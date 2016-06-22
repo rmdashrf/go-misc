@@ -181,8 +181,8 @@ func (j *Jar) Cookies(u *url.URL) (cookies []*http.Cookie) {
 	return j.cookies(u, time.Now())
 }
 
-// Creates a deep copy of the entries in the cookiejar, suitable for storing
-// into a file.
+// Creates a deep copy of the entries in the cookiejar, suitable for
+// serialization purposes
 func (j *Jar) Entries() map[string]map[string]Entry {
 	j.mu.Lock()
 
