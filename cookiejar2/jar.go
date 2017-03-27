@@ -1,6 +1,5 @@
-// Cookiejar taken from net/http/cookiejar with some slight modifications to
-// allow for easy exporting
-
+// Taken from go 1.8 net/http/cookiejar with some slight modifications to
+// allow for easy exporting and saving
 // Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -11,9 +10,11 @@ package cookiejar2
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -50,22 +51,70 @@ type PublicSuffixList interface {
 	String() string
 }
 
+type CookieEntries map[string]map[string]Entry
+
+type EntryStorage interface {
+	// Saves the cookie entries to the backing storage. A non-nil error will
+	// be logged, but otherwise ignored. It is up to the implementor to ensure
+	// that Save() will not trigger an invalidation event on the same EntryStorage.
+	// Must be goroutine safe.
+	Save(entries CookieEntries) error
+
+	// Fetches the current set of entries from the storage. Must be goroutine safe.
+	Load() (CookieEntries, error)
+
+	// Any items sent on this channel will cause the cookiejar to reload all
+	// of its entries from the entrystorage. Must be goroutine safe.
+	InvalidationEvents() <-chan struct{}
+}
+
 // Options are the options for creating a new Jar.
 type Options struct {
-	DisableSuffixChecking bool
-	PublicSuffixList      PublicSuffixList
+	// PublicSuffixList is the public suffix list that determines whether
+	// an HTTP server can set a cookie for a domain.
+	//
+	// A nil value is valid and may be useful for testing but it is not
+	// secure: it means that the HTTP server for foo.co.uk can set a cookie
+	// for bar.co.uk.
+	PublicSuffixList PublicSuffixList
+
+	// If InsecureSufixList is set, then the default public suffix list will
+	// not be loaded.
+	InsecureSuffixList bool
+
+	// If non-nil, cookies will be initially loaded from Storage. Cookies will
+	// be persisted to this storage when SaveCookies() is called, or if
+	// SaveOnSetCookies is true.
+	Storage EntryStorage
+
+	// If specified, the in memory cookies will be flushed to the backing
+	// storage everytime SetCookies() is called
+	SaveOnSetCookies bool
+
+	// If specified, invalidation notifications will be ignored, causing the
+	// cookiejar to not reload its entries
+	IgnoreInvalidations bool
+
+	// If non-nil, error logging will be directed to this logger. Otherwise,
+	// messages will go to os.Stderr
+	ErrorLog *log.Logger
 }
 
 // Jar implements the http.CookieJar interface from the net/http package.
 type Jar struct {
 	psList PublicSuffixList
 
+	logger              *log.Logger
+	storage             EntryStorage
+	saveOnSetCookies    bool
+	ignoreInvalidations bool
+
 	// mu locks the remaining fields.
 	mu sync.Mutex
 
 	// entries is a set of entries, keyed by their eTLD+1 and subkeyed by
 	// their name/domain/path.
-	entries map[string]map[string]Entry
+	entries CookieEntries
 
 	// nextSeqNum is the next sequence number assigned to a new cookie
 	// created SetCookies.
@@ -75,21 +124,42 @@ type Jar struct {
 // New returns a new cookie jar. A nil *Options is equivalent to a zero
 // Options.
 func New(o *Options) *Jar {
+	if o == nil {
+		o = &Options{}
+	}
+
 	jar := &Jar{
-		entries: make(map[string]map[string]Entry),
+		entries:             make(map[string]map[string]Entry),
+		storage:             o.Storage,
+		saveOnSetCookies:    o.SaveOnSetCookies,
+		ignoreInvalidations: o.IgnoreInvalidations,
 	}
-	if o != nil {
-		if o.DisableSuffixChecking {
-			jar.psList = nil
-		} else {
-			if o.PublicSuffixList != nil {
-				jar.psList = o.PublicSuffixList
-			} else {
-				jar.psList = publicsuffix.List
-			}
+
+	var suffixList PublicSuffixList
+	if o.PublicSuffixList == nil && !o.InsecureSuffixList {
+		suffixList = publicsuffix.List
+	} else {
+		suffixList = o.PublicSuffixList
+	}
+
+	jar.psList = suffixList
+
+	if o.ErrorLog == nil {
+		jar.logger = log.New(os.Stderr, "cookiejar2: ", log.LstdFlags)
+	} else {
+		jar.logger = o.ErrorLog
+	}
+
+	if !jar.ignoreInvalidations {
+		go jar.listenForInvalidations()
+	}
+
+	if jar.storage != nil {
+		if err := jar.loadFromStorage(); err != nil {
+			log.Printf("Failed to load initial set of cookies from storage: %v\n", err)
 		}
-		jar.psList = o.PublicSuffixList
 	}
+
 	return jar
 }
 
@@ -116,7 +186,7 @@ type Entry struct {
 	seqNum uint64
 }
 
-// Id returns the domain;path;name triple of e as an id.
+// id returns the domain;path;name triple of e as an id.
 func (e *Entry) id() string {
 	return fmt.Sprintf("%s;%s;%s", e.Domain, e.Path, e.Name)
 }
@@ -155,24 +225,6 @@ func (e *Entry) pathMatch(requestPath string) bool {
 func hasDotSuffix(s, suffix string) bool {
 	return len(s) > len(suffix) && s[len(s)-len(suffix)-1] == '.' && s[len(s)-len(suffix):] == suffix
 }
-
-// byPathLength is a []Entry sort.Interface that sorts according to RFC 6265
-// section 5.4 point 2: by longest path and then by earliest creation time.
-type byPathLength []Entry
-
-func (s byPathLength) Len() int { return len(s) }
-
-func (s byPathLength) Less(i, j int) bool {
-	if len(s[i].Path) != len(s[j].Path) {
-		return len(s[i].Path) > len(s[j].Path)
-	}
-	if !s[i].Creation.Equal(s[j].Creation) {
-		return s[i].Creation.Before(s[j].Creation)
-	}
-	return s[i].seqNum < s[j].seqNum
-}
-
-func (s byPathLength) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
 // Cookies implements the Cookies method of the http.CookieJar interface.
 //
@@ -257,7 +309,18 @@ func (j *Jar) cookies(u *url.URL, now time.Time) (cookies []*http.Cookie) {
 		}
 	}
 
-	sort.Sort(byPathLength(selected))
+	// sort according to RFC 6265 section 5.4 point 2: by longest
+	// path and then by earliest creation time.
+	sort.Slice(selected, func(i, j int) bool {
+		s := selected
+		if len(s[i].Path) != len(s[j].Path) {
+			return len(s[i].Path) > len(s[j].Path)
+		}
+		if !s[i].Creation.Equal(s[j].Creation) {
+			return s[i].Creation.Before(s[j].Creation)
+		}
+		return s[i].seqNum < s[j].seqNum
+	})
 	for _, e := range selected {
 		cookies = append(cookies, &http.Cookie{Name: e.Name, Value: e.Value})
 	}
@@ -331,6 +394,17 @@ func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, now time.Time) {
 		} else {
 			j.entries[key] = submap
 		}
+
+		if j.storage != nil && j.saveOnSetCookies {
+			j.saveCookies()
+		}
+	}
+}
+
+// Lock should already be acquired
+func (j *Jar) saveCookies() {
+	if err := j.storage.Save(j.entries); err != nil {
+		j.logger.Printf("Failed to save cookies: %v\n", err)
 	}
 }
 
@@ -530,4 +604,40 @@ func (j *Jar) domainAndType(host, domain string) (string, bool, error) {
 	}
 
 	return domain, false, nil
+}
+
+func (j *Jar) loadFromStorage() error {
+	if j.storage == nil {
+		panic("loadFromStorage called with no storage")
+	}
+
+	newEntries, err := j.storage.Load()
+	if err != nil {
+		return err
+	}
+
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.entries = newEntries
+
+	return nil
+}
+
+func (j *Jar) listenForInvalidations() {
+	invalidationCh := j.storage.InvalidationEvents()
+	for {
+		<-invalidationCh
+		j.logger.Println("Reloading in memory cookie entries due to invalidation event")
+
+		if err := j.loadFromStorage(); err != nil {
+			j.logger.Printf("Failed to reload from storage: %v\n", err)
+		}
+	}
+}
+
+func (j *Jar) SaveCookies() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	j.saveCookies()
 }
