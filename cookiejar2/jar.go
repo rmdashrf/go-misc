@@ -145,12 +145,12 @@ func New(o *Options) *Jar {
 	jar.psList = suffixList
 
 	if o.ErrorLog == nil {
-		jar.logger = log.New(os.Stderr, "cookiejar2: ", log.LstdFlags)
+		jar.logger = log.New(os.Stderr, "", log.LstdFlags)
 	} else {
 		jar.logger = o.ErrorLog
 	}
 
-	if !jar.ignoreInvalidations {
+	if jar.storage != nil && !jar.ignoreInvalidations {
 		go jar.listenForInvalidations()
 	}
 
@@ -235,7 +235,7 @@ func (j *Jar) Cookies(u *url.URL) (cookies []*http.Cookie) {
 
 // Creates a deep copy of the entries in the cookiejar, suitable for
 // serialization purposes
-func (j *Jar) Entries() map[string]map[string]Entry {
+func (j *Jar) Entries() CookieEntries {
 	j.mu.Lock()
 
 	ret := make(map[string]map[string]Entry)
@@ -636,6 +636,10 @@ func (j *Jar) listenForInvalidations() {
 }
 
 func (j *Jar) SaveCookies() {
+	if j.storage == nil {
+		return
+	}
+
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
