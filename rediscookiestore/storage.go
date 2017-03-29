@@ -92,12 +92,7 @@ func (r *RedisCookieStore) Save(entries cookiejar2.CookieEntries) (err error) {
 		return
 	}
 
-	err = r.redis.Set(r.storeName, contents, 0).Err()
-	if err != nil {
-		return
-	}
-
-	err = r.redis.Publish(r.storeInvName, r.id).Err()
+	err = scriptSetAndPub.Run(r.redis, []string{r.storeName, r.storeInvName}, contents, r.id).Err()
 	return
 }
 
