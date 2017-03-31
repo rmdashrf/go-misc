@@ -2,6 +2,7 @@ package tlsmisc
 
 import (
 	"crypto/tls"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -90,14 +91,16 @@ func (r *ReloadingCertificateGetter) fileWatch() {
 		return
 	}
 
-	if err := watcher.Add(r.certfile); err != nil {
-		r.fireError(&WatcherError{err})
-		return
-	}
+	certFileDir := filepath.Dir(r.certfile)
+	keyfileDir := filepath.Dir(r.keyfile)
 
-	if err := watcher.Add(r.keyfile); err != nil {
-		r.fireError(&WatcherError{err})
-		return
+	watches := []string{certFileDir, keyfileDir}
+
+	for _, w := range watches {
+		if err := watcher.Add(w); err != nil {
+			r.fireError(&WatcherError{err})
+			return
+		}
 	}
 
 	t := time.NewTimer(0)
@@ -114,7 +117,7 @@ LOOP:
 			}
 		case event := <-watcher.Events:
 			{
-				if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+				if (event.Name == r.certfile || event.Name == r.keyfile) && event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
 					if r.opts.CoalescingTimeout == 0 {
 						t.Reset(100 * time.Millisecond)
 					} else {
