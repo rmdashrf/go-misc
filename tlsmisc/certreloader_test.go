@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -97,11 +98,10 @@ func TestManualReload(t *testing.T) {
 			filepath.Join(dir, "test1.pem"),
 			filepath.Join(dir, "test1-key.pem"),
 			DisableFsWatch,
+			WithErrorCallback(func(err error) {
+				t.Fatal("Unexpected error callback", err)
+			}),
 		)
-
-		cg.ErrorCallback(func(err error) {
-			t.Fatal("Got unexpected error callback", err)
-		})
 
 		if err != nil {
 			t.Fatal("Could not create certificate getter", err)
@@ -131,15 +131,19 @@ func TestManualReload(t *testing.T) {
 }
 
 func TestFilesystemReload(t *testing.T) {
+	var numReloads int32
+
 	withTestDirEnv(t, "test1", func(dir string) {
 		cg, err := ReloadingCertificateGetterFromFile(
 			filepath.Join(dir, "test1.pem"),
 			filepath.Join(dir, "test1-key.pem"),
+			WithErrorCallback(func(err error) {
+				t.Fatal("Unexpected error callback", err)
+			}),
+			WithReloadCallback(func(*tls.Certificate) {
+				atomic.AddInt32(&numReloads, 1)
+			}),
 		)
-
-		cg.ErrorCallback(func(err error) {
-			t.Fatal("Got unexpected error callback", err)
-		})
 
 		if err != nil {
 			t.Fatal("Could not create certificate getter", err)
@@ -162,5 +166,8 @@ func TestFilesystemReload(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 
 		assertCn(t, cg, "test certificate 2")
+		if atomic.LoadInt32(&numReloads) != 1 {
+			t.Fatal("Callback did not adjust numReloads")
+		}
 	})
 }

@@ -2,7 +2,6 @@ package tlsmisc
 
 import (
 	"crypto/tls"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,9 +17,6 @@ type ReloadingCertificateGetter struct {
 	currentCert atomic.Value
 	reloadCh    chan struct{}
 	stopCh      chan struct{}
-
-	errorCbMu sync.Mutex
-	errorCb   func(err error)
 
 	certfile string
 	keyfile  string
@@ -51,14 +47,6 @@ func (r *ReloadingCertificateGetter) Stop() {
 	close(r.stopCh)
 }
 
-/// Registers a callback to be called whenever an error is encountered
-/// Possible errors that can be returned are *ReloadError, *WatchError
-func (r *ReloadingCertificateGetter) ErrorCallback(f func(err error)) {
-	r.errorCbMu.Lock()
-	r.errorCb = f
-	r.errorCbMu.Unlock()
-}
-
 /// Reloads the certificate from disk. Any errors encountered will be reported
 /// through the registered error callback.
 func (r *ReloadingCertificateGetter) Reload() {
@@ -76,18 +64,23 @@ func (r *ReloadingCertificateGetter) Reload() {
 
 	// Certificate load successful
 	r.currentCert.Store(&cert)
+	r.fireReloadCallback(&cert)
 }
 
 func (r *ReloadingCertificateGetter) fireError(err error) {
-	r.errorCbMu.Lock()
-	cb := r.errorCb
-	r.errorCbMu.Unlock()
+	cb := r.opts.ErrorCallback
 
-	if cb == nil {
-		return
+	if cb != nil {
+		cb(err)
 	}
+}
 
-	cb(err)
+func (r *ReloadingCertificateGetter) fireReloadCallback(newCert *tls.Certificate) {
+	cb := r.opts.ReloadCallback
+
+	if cb != nil {
+		cb(newCert)
+	}
 }
 
 func (r *ReloadingCertificateGetter) fileWatch() {
@@ -163,6 +156,8 @@ func (r *ReloadingCertificateGetter) run() {
 type options struct {
 	DisableFilesystemWatch bool
 	CoalescingTimeout      time.Duration
+	ErrorCallback          func(error)
+	ReloadCallback         func(newCert *tls.Certificate)
 }
 
 type Option func(*options)
@@ -174,6 +169,18 @@ func DisableFsWatch(opt *options) {
 func WithCoalescingTimeout(d time.Duration) Option {
 	return func(opt *options) {
 		opt.CoalescingTimeout = d
+	}
+}
+
+func WithErrorCallback(cb func(error)) Option {
+	return func(opt *options) {
+		opt.ErrorCallback = cb
+	}
+}
+
+func WithReloadCallback(cb func(*tls.Certificate)) Option {
+	return func(opt *options) {
+		opt.ReloadCallback = cb
 	}
 }
 
