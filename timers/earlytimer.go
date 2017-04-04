@@ -18,9 +18,37 @@ type EarlyPeriodicTimer struct {
 	stopChan chan struct{}
 }
 
-func NewEarlyPeriodicTimer(period time.Duration, task func()) *EarlyPeriodicTimer {
+type earlyTimerOpts struct {
+	stopChan   chan struct{}
+	runOnStart bool
+}
+
+type EarlyTimerOption func(*earlyTimerOpts)
+
+func WithStopCh(stopCh chan struct{}) EarlyTimerOption {
+	return func(opts *earlyTimerOpts) {
+		opts.stopChan = stopCh
+	}
+}
+
+func RunOnStart() EarlyTimerOption {
+	return func(opts *earlyTimerOpts) {
+		opts.runOnStart = true
+	}
+}
+
+func NewEarlyPeriodicTimer(period time.Duration, task func(), opts ...EarlyTimerOption) *EarlyPeriodicTimer {
 	if task == nil {
 		panic("Empty task")
+	}
+
+	var options earlyTimerOpts
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	if options.stopChan == nil {
+		options.stopChan = make(chan struct{})
 	}
 
 	timer := time.NewTimer(0)
@@ -30,10 +58,10 @@ func NewEarlyPeriodicTimer(period time.Duration, task func()) *EarlyPeriodicTime
 		timer:    timer,
 		task:     task,
 		period:   period,
-		stopChan: make(chan struct{}),
+		stopChan: options.stopChan,
 	}
 
-	go ret.run()
+	go ret.run(options.runOnStart)
 	return ret
 }
 
@@ -59,7 +87,11 @@ func (p *EarlyPeriodicTimer) RunNow() {
 	p.startTimer()
 }
 
-func (p *EarlyPeriodicTimer) run() {
+func (p *EarlyPeriodicTimer) run(runOnStart bool) {
+	if runOnStart {
+		p.task()
+	}
+
 	p.startTimer()
 	for {
 		select {
