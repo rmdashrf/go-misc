@@ -38,9 +38,13 @@ func NewRedisCookieStore(redis *redis.Client, storePrefix string) *RedisCookieSt
 }
 
 func (r *RedisCookieStore) listenForInvalidations() {
-	invName := InvalidationName(r.storeKey)
+	var (
+		invName = InvalidationName(r.storeKey)
+		err     error
+	)
+
 	for {
-		pubsub, err := r.redis.Subscribe(invName)
+		pubsub := r.redis.Subscribe(invName)
 		if err != nil {
 			log.Printf("Failed to subscribe to %s: %v\n", invName, err)
 			time.Sleep(1 * time.Second)
