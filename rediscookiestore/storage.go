@@ -14,8 +14,7 @@ import (
 type RedisCookieStore struct {
 	redis        *redis.Client
 	id           string
-	storeName    string
-	storeInvName string
+	storeKey     string
 	invalidateCh chan struct{}
 }
 
@@ -29,8 +28,7 @@ func NewRedisCookieStore(redis *redis.Client, storePrefix string) *RedisCookieSt
 	store := &RedisCookieStore{
 		redis:        redis,
 		id:           fmt.Sprintf("%d", id),
-		storeInvName: fmt.Sprintf("%s:invalidation", storePrefix),
-		storeName:    fmt.Sprintf("%s:store", storePrefix),
+		storeKey:     storePrefix,
 		invalidateCh: make(chan struct{}, 1),
 	}
 
@@ -40,10 +38,11 @@ func NewRedisCookieStore(redis *redis.Client, storePrefix string) *RedisCookieSt
 }
 
 func (r *RedisCookieStore) listenForInvalidations() {
+	invName := InvalidationName(r.storeKey)
 	for {
-		pubsub, err := r.redis.Subscribe(r.storeInvName)
+		pubsub, err := r.redis.Subscribe(invName)
 		if err != nil {
-			log.Printf("Failed to subscribe to %s: %v\n", r.storeInvName, err)
+			log.Printf("Failed to subscribe to %s: %v\n", invName, err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -73,7 +72,8 @@ func (r *RedisCookieStore) InvalidationEvents() <-chan struct{} {
 }
 
 func (r *RedisCookieStore) Load() (ret cookiejar2.CookieEntries, err error) {
-	content, err := r.redis.Get(r.storeName).Bytes()
+	storeName := StoreName(r.storeKey)
+	content, err := r.redis.Get(storeName).Bytes()
 	if err != nil {
 		if err == redis.Nil {
 			return make(cookiejar2.CookieEntries), nil
@@ -86,14 +86,7 @@ func (r *RedisCookieStore) Load() (ret cookiejar2.CookieEntries, err error) {
 }
 
 func (r *RedisCookieStore) Save(entries cookiejar2.CookieEntries) (err error) {
-	var contents []byte
-	contents, err = json.Marshal(entries)
-	if err != nil {
-		return
-	}
-
-	err = scriptSetAndPub.Run(r.redis, []string{r.storeName, r.storeInvName}, contents, r.id).Err()
-	return
+	return SetCookies(r.redis, r.storeKey, entries, r.id)
 }
 
 var _ cookiejar2.EntryStorage = (*RedisCookieStore)(nil)
