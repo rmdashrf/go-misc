@@ -2,6 +2,7 @@ package editthiscookie
 
 import (
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,7 @@ func (e *Entry) GoCookie() *http.Cookie {
 
 	return &http.Cookie{
 		Name:     e.Name,
-		Value:    e.Value,
+		Value:    strings.Replace(e.Value, "\"", "", -1),
 		Path:     e.Path,
 		Domain:   e.Domain,
 		Expires:  expiration,
